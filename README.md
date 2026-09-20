@@ -24,6 +24,8 @@ Predictors include lagged returns and log trading volumes from ten U.S. equities
 
 ## Data
 
-`StockPriceDataset.csv` contains the daily stock-market data used in the analysis and is included in this repository for reproducibility.
+The dataset used in this project is from the
+[Historical Stock Price Dataset](https://www.kaggle.com/datasets/anitarostami/historical-stock-price-dataset)
+on Kaggle.
 
-The dataset contains daily observations for ten U.S. equities from 2014 to 2023, including daily log returns and trading-volume information.
+`StockPriceDataset.csv` contains the data used in the analysis and is included in this repository for reproducibility. The analysis uses daily observations for ten U.S. equities from 2014 to 2023, including daily log returns and trading-volume information.
