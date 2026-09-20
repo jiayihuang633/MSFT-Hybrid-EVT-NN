@@ -20,15 +20,10 @@ Predictors include lagged returns and log trading volumes from ten U.S. equities
 
 - [`MSFT_Hybrid_EVT_NN_Report.pdf`](MSFT_Hybrid_EVT_NN_Report.pdf) — full research report
 - [`MSFT_Hybrid_EVT_NN.Rmd`](MSFT_Hybrid_EVT_NN.Rmd) — complete R analysis and reproducible report source
+- [`StockPriceDataset.csv`](StockPriceDataset.csv) — dataset used in the analysis
 
 ## Data
 
-The analysis uses `StockPriceDataset.csv`.
+`StockPriceDataset.csv` contains the daily stock-market data used in the analysis and is included in this repository for reproducibility.
 
-To reproduce the analysis, place the dataset in the repository root:
-
-```text
-MSFT-Hybrid-EVT-NN/
-├── MSFT_Hybrid_EVT_NN.Rmd
-├── MSFT_Hybrid_EVT_NN_Report.pdf
-└── StockPriceDataset.csv
+The dataset contains daily observations for ten U.S. equities from 2014 to 2023, including daily log returns and trading-volume information.
