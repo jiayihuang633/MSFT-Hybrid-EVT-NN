@@ -1,0 +1,3442 @@
+---
+title: "Hybrid Gaussian–GPD Neural Network for Conditional MSFT Tail Risk"
+subtitle: "A Research Report on Neural-Network Conditional Density Estimation and Extreme-Value Risk"
+author: "Jiayi (Julie) Huang"
+date: "September 2026"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+geometry: margin=1in
+fontsize: 11pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{amsmath}
+  - \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width = 7,
+  fig.height = 4.5,
+  dpi = 150
+)
+options(scipen = 4)
+
+# Okabe-Ito color-blind-friendly palette used consistently in multi-series figures
+cb_black  <- "#000000"
+cb_blue   <- "#0072B2"
+cb_vermillion <- "#D55E00"
+```
+
+```{r full-analysis, include=FALSE}
+library(ismev)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(keras3)
+library(tensorflow)
+
+data_path <- "StockPriceDataset.csv"
+
+if (!file.exists(data_path)) {
+  stop(
+    "StockPriceDataset.csv was not found. See README.md for data instructions."
+  )
+}
+
+stock_data <- read.csv(data_path)
+
+# Remove observations with missing daily log returns
+stock_data <- stock_data[
+  !is.na(stock_data$Daily_log_return),
+]
+
+# Check tickers
+unique(stock_data$Ticker)
+
+# Define loss: large negative returns become large positive losses
+stock_data$Loss <- -stock_data$Daily_log_return
+
+# Summary of daily log returns
+summary(stock_data$Daily_log_return)
+
+# Plot daily log returns by ticker
+par(mfrow = c(2, 5))
+
+for (ticker in unique(stock_data$Ticker)) {
+  
+  dat <- subset(
+    stock_data,
+    Ticker == ticker
+  )
+  
+  hist(
+    dat$Daily_log_return,
+    breaks = 50,
+    main = ticker,
+    xlab = "Daily Log Return"
+  )
+}
+
+par(mfrow = c(1, 1))
+
+tickers <- unique(stock_data$Ticker)
+
+shape_results <- data.frame(
+  Ticker = character(),
+  Threshold = numeric(),
+  N_Exceedances = integer(),
+  Scale = numeric(),
+  Scale_SE = numeric(),
+  Shape = numeric(),
+  Shape_SE = numeric(),
+  Shape_Lower_95 = numeric(),
+  Shape_Upper_95 = numeric()
+)
+
+for (ticker in tickers) {
+  
+  dat <- subset(
+    stock_data,
+    Ticker == ticker
+  )
+  
+  loss <- dat$Loss
+  
+  u <- quantile(
+    loss,
+    probs = 0.95,
+    na.rm = TRUE
+  )
+  
+  fit <- gpd.fit(
+    loss,
+    threshold = u,
+    show = FALSE
+  )
+  
+  scale_hat <- fit$mle[1]
+  shape_hat <- fit$mle[2]
+  
+  scale_se <- fit$se[1]
+  shape_se <- fit$se[2]
+  
+  shape_results <- rbind(
+    shape_results,
+    data.frame(
+      Ticker = ticker,
+      Threshold = u,
+      N_Exceedances = sum(loss > u),
+      Scale = scale_hat,
+      Scale_SE = scale_se,
+      Shape = shape_hat,
+      Shape_SE = shape_se,
+      Shape_Lower_95 =
+        shape_hat - 1.96 * shape_se,
+      Shape_Upper_95 =
+        shape_hat + 1.96 * shape_se
+    )
+  )
+}
+
+shape_results
+
+plot(
+  seq_len(nrow(shape_results)),
+  shape_results$Shape,
+  xaxt = "n",
+  pch = 19,
+  xlab = "Ticker",
+  ylab = "Estimated Shape Parameter",
+  main = "Stationary GPD Shape Estimates"
+)
+
+axis(
+  1,
+  at = seq_len(nrow(shape_results)),
+  labels = shape_results$Ticker
+)
+
+abline(
+  h = 0,
+  lty = 2
+)
+
+threshold_probs <- c(
+  0.90,
+  0.925,
+  0.95,
+  0.975
+)
+
+threshold_results <- data.frame(
+  Ticker = character(),
+  Threshold_Probability = numeric(),
+  Threshold = numeric(),
+  N_Exceedances = integer(),
+  Shape = numeric(),
+  Shape_SE = numeric()
+)
+
+for (ticker in tickers) {
+  
+  dat <- subset(
+    stock_data,
+    Ticker == ticker
+  )
+  
+  loss <- dat$Loss
+  
+  for (p in threshold_probs) {
+    
+    u <- quantile(
+      loss,
+      probs = p,
+      na.rm = TRUE
+    )
+    
+    fit <- gpd.fit(
+      loss,
+      threshold = u,
+      show = FALSE
+    )
+    
+    threshold_results <- rbind(
+      threshold_results,
+      data.frame(
+        Ticker = ticker,
+        Threshold_Probability = p,
+        Threshold = u,
+        N_Exceedances = sum(loss > u),
+        Shape = fit$mle[2],
+        Shape_SE = fit$se[2]
+      )
+    )
+  }
+}
+
+threshold_results
+
+par(mar = c(5, 5, 4, 8), xpd = TRUE)
+
+plot(
+  NULL,
+  xlim = range(threshold_probs),
+  ylim = range(
+    threshold_results$Shape,
+    na.rm = TRUE
+  ),
+  xaxt = "n",
+  xlab = "Threshold Quantile",
+  ylab = "Estimated Shape Parameter",
+  main = "GPD Shape Parameter Threshold Sensitivity"
+)
+
+axis(
+  side = 1,
+  at = threshold_probs,
+  labels = c("90%", "92.5%", "95%", "97.5%")
+)
+
+for (i in seq_along(tickers)) {
+  
+  temp <- subset(
+    threshold_results,
+    Ticker == tickers[i]
+  )
+  
+  lines(
+    temp$Threshold_Probability,
+    temp$Shape,
+    type = "b",
+    pch = i
+  )
+}
+
+abline(
+  h = 0,
+  lty = 2
+)
+
+legend(
+  "topright",
+  inset = c(-0.20, 0),
+  legend = tickers,
+  pch = seq_along(tickers),
+  lty = 1,
+  cex = 0.75,
+  bty = "n"
+)
+
+par(xpd = FALSE)
+
+stock_model <- stock_data %>%
+  mutate(
+    Date = as.Date(
+      Date,
+      format = "%m/%d/%Y"
+    )
+  ) %>%
+  arrange(
+    Date,
+    Ticker
+  )
+
+daily_wide <- stock_model %>%
+  mutate(
+    LogVolume = log1p(Volume)
+  ) %>%
+  select(
+    Date,
+    Ticker,
+    Daily_log_return,
+    LogVolume
+  ) %>%
+  pivot_wider(
+    names_from = Ticker,
+    values_from = c(
+      Daily_log_return,
+      LogVolume
+    ),
+    names_glue = "{.value}_{Ticker}"
+  ) %>%
+  arrange(Date) %>%
+  mutate(
+    DayOfWeek = factor(
+      weekdays(Date),
+      levels = c(
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday"
+      ),
+      labels = c(
+        "Mon",
+        "Tue",
+        "Wed",
+        "Thu",
+        "Fri"
+      )
+    )
+  )
+
+head(daily_wide)
+
+# identify the return and log-volume columns
+
+return_cols <- grep(
+  "^Daily_log_return_",
+  names(daily_wide),
+  value = TRUE
+)
+
+volume_cols <- grep(
+  "^LogVolume_",
+  names(daily_wide),
+  value = TRUE
+)
+
+lag_source_cols <- c(
+  return_cols,
+  volume_cols
+)
+
+# construct t−1,…,t−5
+
+daily_lagged <- daily_wide
+
+for (k in 1:5) {
+  
+  for (var in lag_source_cols) {
+    
+    daily_lagged[[paste0(var, "_lag", k)]] <- lag(
+      daily_lagged[[var]],
+      n = k
+    )
+    
+  }
+}
+
+# identify the lag columns
+
+lag_cols <- grep(
+  "_lag[1-5]$",
+  names(daily_lagged),
+  value = TRUE
+)
+
+length(lag_cols)
+# 100 predictors = 10 stocks × 5 trading-day lags × 2 variables
+
+daily_model_data <- daily_lagged %>%
+  mutate(
+    
+    # Microsoft daily log return
+    Y_return =
+      Daily_log_return_MSFT,
+    
+    # Microsoft daily loss
+    Y_loss =
+      -Daily_log_return_MSFT
+    
+  ) %>%
+  select(
+    Date,
+    DayOfWeek,
+    all_of(lag_cols),
+    Y_return,
+    Y_loss
+  ) %>%
+  drop_na()
+
+dim(daily_model_data)
+
+n <- nrow(
+  daily_model_data
+)
+
+train_end <- floor(
+  0.90 * n
+)
+
+train_raw <- daily_model_data[
+  1:train_end,
+]
+
+test_raw <- daily_model_data[
+  (train_end + 1):n,
+]
+
+n_train <- nrow(
+  train_raw
+)
+
+subtrain_end <- floor(
+  0.90 * n_train
+)
+
+subtrain_raw <- train_raw[
+  1:subtrain_end,
+]
+
+validation_raw <- train_raw[
+  (subtrain_end + 1):n_train,
+]
+
+nrow(subtrain_raw)
+nrow(validation_raw)
+nrow(test_raw)
+
+range(subtrain_raw$Date)
+range(validation_raw$Date)
+range(test_raw$Date)
+
+predictor_cols <- lag_cols
+
+# Calculate preprocessing parameters
+# using subtraining data only
+
+subtrain_center <- sapply(
+  subtrain_raw[, predictor_cols],
+  mean
+)
+
+subtrain_scale <- sapply(
+  subtrain_raw[, predictor_cols],
+  sd
+)
+
+subtrain_scale[
+  subtrain_scale == 0 |
+    is.na(subtrain_scale)
+] <- 1
+
+subtrain_scaled <- subtrain_raw
+validation_scaled <- validation_raw
+
+for (var in predictor_cols) {
+
+  subtrain_scaled[[var]] <-
+    (
+      subtrain_raw[[var]] -
+        subtrain_center[var]
+    ) /
+    subtrain_scale[var]
+
+  validation_scaled[[var]] <-
+    (
+      validation_raw[[var]] -
+        subtrain_center[var]
+    ) /
+    subtrain_scale[var]
+}
+
+dow_subtrain <- model.matrix(
+  ~ DayOfWeek - 1,
+  data = subtrain_scaled
+)
+
+dow_validation <- model.matrix(
+  ~ DayOfWeek - 1,
+  data = validation_scaled
+)
+
+X_subtrain <- cbind(
+  as.matrix(
+    subtrain_scaled[, predictor_cols]
+  ),
+  dow_subtrain
+)
+
+X_validation <- cbind(
+  as.matrix(
+    validation_scaled[, predictor_cols]
+  ),
+  dow_validation
+)
+
+dim(X_subtrain)
+dim(X_validation)
+
+threshold_probs <- seq(
+  0.80,
+  0.975,
+  by = 0.025
+)
+
+msft_threshold_results <- data.frame()
+
+loss <- train_raw$Y_loss
+
+for (p in threshold_probs) {
+  
+  u <- quantile(
+    loss,
+    probs = p,
+    na.rm = TRUE
+  )
+  
+  
+  n_exc <- sum(
+    loss > u,
+    na.rm = TRUE
+  )
+  
+  
+  fit <- try(
+    gpd.fit(
+      loss,
+      threshold = u,
+      show = FALSE
+    ),
+    silent = TRUE
+  )
+  
+  
+  if (
+    inherits(
+      fit,
+      "try-error"
+    )
+  ) {
+    
+    shape_hat <- NA
+    shape_se <- NA
+    
+  } else {
+    
+    shape_hat <- fit$mle[2]
+    shape_se <- fit$se[2]
+    
+  }
+  
+  
+  msft_threshold_results <- rbind(
+    msft_threshold_results,
+    data.frame(
+      Threshold_Probability = p,
+      Threshold = u,
+      N_Exceedances = n_exc,
+      Shape = shape_hat,
+      Shape_SE = shape_se,
+      Shape_Lower_95 =
+        shape_hat -
+        1.96 * shape_se,
+      Shape_Upper_95 =
+        shape_hat +
+        1.96 * shape_se
+    )
+  )
+}
+
+# Display
+
+msft_threshold_results %>%
+  mutate(
+    across(
+      where(is.numeric),
+      ~ round(.x, 4)
+    )
+  )
+
+plot(
+  msft_threshold_results$Threshold_Probability,
+  msft_threshold_results$Shape,
+  type = "b",
+  pch = 19,
+  ylim = range(
+    c(
+      msft_threshold_results$Shape_Lower_95,
+      msft_threshold_results$Shape_Upper_95
+    ),
+    na.rm = TRUE
+  ),
+  xlab = "Threshold Quantile",
+  ylab = "Estimated Shape",
+  main = "MSFT GPD Shape Stability"
+)
+
+arrows(
+  x0 =
+    msft_threshold_results$Threshold_Probability,
+  y0 =
+    msft_threshold_results$Shape_Lower_95,
+  x1 =
+    msft_threshold_results$Threshold_Probability,
+  y1 =
+    msft_threshold_results$Shape_Upper_95,
+  angle = 90,
+  code = 3,
+  length = 0.03
+)
+
+abline(
+  h = 0,
+  lty = 2
+)
+
+mean_excess_results <- data.frame()
+
+loss <- train_raw$Y_loss
+
+threshold_grid <- quantile(
+  loss,
+  probs = seq(
+    0.70,
+    0.975,
+    by = 0.01
+  ),
+  na.rm = TRUE
+)
+
+for (u in threshold_grid) {
+  
+  exceedances <-
+    loss[loss > u] - u
+  
+  
+  mean_excess_results <- rbind(
+    mean_excess_results,
+    data.frame(
+      Threshold = u,
+      MeanExcess =
+        mean(exceedances),
+      N_Exceedances =
+        length(exceedances)
+    )
+  )
+}
+
+plot(
+  mean_excess_results$Threshold,
+  mean_excess_results$MeanExcess,
+  type = "b",
+  pch = 19,
+  xlab = "Loss Threshold",
+  ylab = "Mean Excess",
+  main = "MSFT Mean Excess Plot"
+)
+
+y_center <- mean(
+  subtrain_raw$Y_loss
+)
+
+y_scale <- sd(
+  subtrain_raw$Y_loss
+)
+
+
+y_subtrain <- matrix(
+  (
+    subtrain_raw$Y_loss -
+      y_center
+  ) / y_scale,
+  ncol = 1
+)
+
+
+y_validation <- matrix(
+  (
+    validation_raw$Y_loss -
+      y_center
+  ) / y_scale,
+  ncol = 1
+)
+
+gaussian_nll <- function(y_true, y_pred) {
+  
+  y <- y_true[, 1]
+  
+  mu <- y_pred[, 1]
+  
+  log_sigma <- y_pred[, 2]
+  
+  sigma <- op_exp(log_sigma)
+  
+  nll <-
+    log_sigma +
+    0.5 *
+    op_square(
+      (y - mu) / sigma
+    )
+  
+  op_mean(nll)
+}
+
+clear_session()
+set_random_seed(123)
+
+gaussian_input <- keras_input(
+  shape = ncol(X_subtrain),
+  name = "gaussian_input"
+)
+
+gaussian_hidden <- gaussian_input |>
+  layer_dense(
+    units = 16,
+    activation = "relu"
+  ) |>
+  layer_dense(
+    units = 16,
+    activation = "relu"
+  )
+
+mu_output <- gaussian_hidden |>
+  layer_dense(
+    units = 1,
+    activation = "linear",
+    name = "mu"
+  )
+
+log_sigma_output <- gaussian_hidden |>
+  layer_dense(
+    units = 1,
+    activation = "linear",
+    bias_initializer = initializer_constant(0),
+    name = "log_sigma"
+  )
+
+gaussian_output <- layer_concatenate(
+  list(
+    mu_output,
+    log_sigma_output
+  )
+)
+
+gaussian_model <- keras_model(
+  inputs = gaussian_input,
+  outputs = gaussian_output
+)
+
+gaussian_model |>
+  compile(
+    optimizer = optimizer_adam(
+      learning_rate = 0.0005
+    ),
+    loss = gaussian_nll
+  )
+
+gaussian_history <- gaussian_model |>
+  fit(
+    x = X_subtrain,
+    y = y_subtrain,
+    validation_data = list(
+      X_validation,
+      y_validation
+    ),
+    epochs = 1,
+    batch_size = 32,
+    shuffle = FALSE,
+    verbose = 0
+  )
+
+gaussian_pred_subtrain <- predict(
+  gaussian_model,
+  X_subtrain
+)
+
+gaussian_pred_validation <- predict(
+  gaussian_model,
+  X_validation
+)
+
+mu_subtrain <-
+  y_center +
+  y_scale *
+  gaussian_pred_subtrain[, 1]
+
+mu_validation <-
+  y_center +
+  y_scale *
+  gaussian_pred_validation[, 1]
+
+sigma_subtrain <-
+  y_scale *
+  exp(
+    gaussian_pred_subtrain[, 2]
+  )
+
+sigma_validation <-
+  y_scale *
+  exp(
+    gaussian_pred_validation[, 2]
+  )
+
+tau <- 0.90
+z_tau <- qnorm(tau)
+
+threshold_subtrain <-
+  mu_subtrain +
+  z_tau * sigma_subtrain
+
+threshold_validation <-
+  mu_validation +
+  z_tau * sigma_validation
+
+loss_subtrain <-
+  subtrain_raw$Y_loss
+
+loss_validation <-
+  validation_raw$Y_loss
+
+is_exceedance_subtrain <-
+  loss_subtrain >
+  threshold_subtrain
+
+is_exceedance_validation <-
+  loss_validation >
+  threshold_validation
+
+excess_subtrain <-
+  loss_subtrain[
+    is_exceedance_subtrain
+  ] -
+  threshold_subtrain[
+    is_exceedance_subtrain
+  ]
+
+excess_validation <-
+  loss_validation[
+    is_exceedance_validation
+  ] -
+  threshold_validation[
+    is_exceedance_validation
+  ]
+
+X_gpd_subtrain <- X_subtrain[
+  is_exceedance_subtrain,
+  ,
+  drop = FALSE
+]
+
+X_gpd_validation <- X_validation[
+  is_exceedance_validation,
+  ,
+  drop = FALSE
+]
+
+# Gaussian conditional means
+summary(mu_subtrain)
+summary(mu_validation)
+
+# Gaussian conditional standard deviations
+summary(sigma_subtrain)
+summary(sigma_validation)
+
+# Conditional 90% thresholds
+summary(threshold_subtrain)
+summary(threshold_validation)
+
+# Number of exceedances
+sum(is_exceedance_subtrain)
+sum(is_exceedance_validation)
+
+# Proportion of exceedances
+mean(is_exceedance_subtrain)
+mean(is_exceedance_validation)
+
+# Excess losses
+summary(excess_subtrain)
+summary(excess_validation)
+
+old_par <- par(
+  mar = c(5, 4, 4, 11) + 0.1,
+  xpd = NA
+)
+
+plot(
+  validation_raw$Date,
+  loss_validation,
+  type = "l",
+  xlab = "Date",
+  ylab = "MSFT Loss",
+  main = "Validation Loss and Conditional 90% Threshold",
+  lwd = 1
+)
+
+lines(
+  validation_raw$Date,
+  threshold_validation,
+  lwd = 2,
+  lty = 2,
+  col = cb_blue
+)
+
+points(
+  validation_raw$Date[is_exceedance_validation],
+  loss_validation[is_exceedance_validation],
+  pch = 19,
+  col = cb_vermillion
+)
+
+usr <- par("usr")
+
+legend(
+  x = usr[2] + 0.03 * (usr[2] - usr[1]),
+  y = usr[4],
+  legend = c(
+    "Observed Loss",
+    "Conditional 90% Threshold",
+    "Exceedance"
+  ),
+  lty = c(1, 2, NA),
+  lwd = c(1, 2, NA),
+  pch = c(NA, NA, 19),
+  col = c(cb_black, cb_blue, cb_vermillion),
+  bty = "n",
+  xjust = 0,
+  yjust = 1
+)
+
+par(old_par)
+
+z_subtrain <-
+  (loss_subtrain - mu_subtrain) /
+  sigma_subtrain
+
+z_validation <-
+  (loss_validation - mu_validation) /
+  sigma_validation
+
+quantile(
+  z_subtrain,
+  0.90
+)
+
+quantile(
+  z_validation,
+  0.90
+)
+
+qnorm(0.90)
+
+# Final Gaussian model: 16-16 hidden architecture, 1 epoch
+# Validation exceedance rate = 9.73% for 10% tail
+
+gpd_nll <- function(y_true, y_pred) {
+  
+  y <- y_true[, 1]
+  
+  # GPD scale parameter: beta > 0
+  beta <-
+    y_pred[, 1] +
+    1e-6
+  
+  # Raw NN output is tanh in (-1, 1)
+  # Actual shape is restricted to (-0.5, 0.5)
+  xi <-
+    0.5 *
+    y_pred[, 2]
+  
+  
+  # GPD support condition
+  support <-
+    1 +
+    xi * y / beta
+  
+  
+  # Avoid division by zero when xi is close to 0
+  xi_safe <- tf$where(
+    tf$abs(xi) < 1e-4,
+    tf$ones_like(xi) * 1e-4,
+    xi
+  )
+  
+  
+  support_safe <- tf$maximum(
+    support,
+    1e-6
+  )
+  
+  
+  # General GPD negative log-likelihood
+  nll_gpd <-
+    tf$math$log(beta) +
+    (
+      1 +
+        1 / xi_safe
+    ) *
+    tf$math$log(
+      support_safe
+    )
+  
+  
+  # When xi is approximately 0,
+  # GPD approaches exponential distribution
+  nll_exp <-
+    tf$math$log(beta) +
+    y / beta
+  
+  
+  nll <- tf$where(
+    tf$abs(xi) < 1e-4,
+    nll_exp,
+    nll_gpd
+  )
+  
+  
+  # Large penalty if GPD support is violated
+  penalty <- tf$where(
+    support > 0,
+    tf$zeros_like(nll),
+    tf$ones_like(nll) * 1e6
+  )
+  
+  
+  tf$reduce_mean(
+    nll + penalty
+  )
+}
+
+# Scale excesses using subtraining data only
+
+excess_scale <- mean(
+  excess_subtrain
+)
+
+y_gpd_subtrain <- matrix(
+  excess_subtrain /
+    excess_scale,
+  ncol = 1
+)
+
+y_gpd_validation <- matrix(
+  excess_validation /
+    excess_scale,
+  ncol = 1
+)
+
+excess_scale
+
+summary(y_gpd_subtrain)
+summary(y_gpd_validation)
+
+clear_session()
+set_random_seed(123)
+
+gpd_input <- keras_input(
+  shape = ncol(X_gpd_subtrain),
+  name = "gpd_input"
+)
+
+gpd_hidden <- gpd_input |>
+  layer_dense(
+    units = 1,
+    activation = "relu"
+  )
+
+gpd_scale_output <- gpd_hidden |>
+  layer_dense(
+    units = 1,
+    activation = "softplus",
+    name = "gpd_scale"
+  )
+
+gpd_shape_output <- gpd_hidden |>
+  layer_dense(
+    units = 1,
+    activation = "tanh",
+    name = "gpd_shape_raw"
+  )
+
+gpd_output <- layer_concatenate(
+  list(
+    gpd_scale_output,
+    gpd_shape_output
+  )
+)
+
+gpd_model <- keras_model(
+  inputs = gpd_input,
+  outputs = gpd_output
+)
+
+gpd_model |>
+  compile(
+    optimizer = optimizer_adam(
+      learning_rate = 0.0005
+    ),
+    loss = gpd_nll
+  )
+
+gpd_history <- gpd_model |>
+  fit(
+    x = X_gpd_subtrain,
+    y = y_gpd_subtrain,
+    validation_data = list(
+      X_gpd_validation,
+      y_gpd_validation
+    ),
+    epochs = 24,
+    batch_size = 16,
+    shuffle = FALSE,
+    verbose = 0
+  )
+
+gpd_pred_subtrain <- predict(
+  gpd_model,
+  X_gpd_subtrain
+)
+
+gpd_pred_validation <- predict(
+  gpd_model,
+  X_gpd_validation
+)
+
+
+# GPD scale on ORIGINAL excess-loss scale
+
+beta_subtrain <-
+  excess_scale *
+  gpd_pred_subtrain[, 1]
+
+beta_validation <-
+  excess_scale *
+  gpd_pred_validation[, 1]
+
+
+# GPD shape is unchanged by scaling
+
+xi_subtrain <-
+  0.5 *
+  gpd_pred_subtrain[, 2]
+
+xi_validation <-
+  0.5 *
+  gpd_pred_validation[, 2]
+
+
+summary(beta_subtrain)
+summary(beta_validation)
+
+summary(xi_subtrain)
+summary(xi_validation)
+
+# Selected GPD model:
+# One hidden layer with 1 unit
+# Best validation epoch = 24
+
+final_center <- sapply(
+  train_raw[, predictor_cols],
+  mean
+)
+
+final_scale <- sapply(
+  train_raw[, predictor_cols],
+  sd
+)
+
+final_scale[
+  final_scale == 0 |
+    is.na(final_scale)
+] <- 1
+
+
+train_final_scaled <- train_raw
+test_final_scaled <- test_raw
+
+for (var in predictor_cols) {
+
+  train_final_scaled[[var]] <-
+    (train_raw[[var]] - final_center[var]) /
+    final_scale[var]
+
+  test_final_scaled[[var]] <-
+    (test_raw[[var]] - final_center[var]) /
+    final_scale[var]
+}
+
+dow_train_final <- model.matrix(
+  ~ DayOfWeek - 1,
+  data = train_final_scaled
+)
+
+dow_test_final <- model.matrix(
+  ~ DayOfWeek - 1,
+  data = test_final_scaled
+)
+
+X_train_final <- cbind(
+  as.matrix(
+    train_final_scaled[, predictor_cols]
+  ),
+  dow_train_final
+)
+
+X_test_final <- cbind(
+  as.matrix(
+    test_final_scaled[, predictor_cols]
+  ),
+  dow_test_final
+)
+
+dim(X_train_final)
+dim(X_test_final)
+
+final_y_center <- mean(
+  train_raw$Y_loss
+)
+
+final_y_scale <- sd(
+  train_raw$Y_loss
+)
+
+y_train_final <- matrix(
+  (
+    train_raw$Y_loss -
+      final_y_center
+  ) / final_y_scale,
+  ncol = 1
+)
+
+y_test_final <- matrix(
+  (
+    test_raw$Y_loss -
+      final_y_center
+  ) / final_y_scale,
+  ncol = 1
+)
+
+clear_session()
+set_random_seed(123)
+
+gaussian_input_final <- keras_input(
+  shape = ncol(X_train_final),
+  name = "gaussian_input_final"
+)
+
+gaussian_hidden_final <- gaussian_input_final |>
+  layer_dense(
+    units = 16,
+    activation = "relu"
+  ) |>
+  layer_dense(
+    units = 16,
+    activation = "relu"
+  )
+
+mu_output_final <- gaussian_hidden_final |>
+  layer_dense(
+    units = 1,
+    activation = "linear",
+    name = "mu_final"
+  )
+
+log_sigma_output_final <- gaussian_hidden_final |>
+  layer_dense(
+    units = 1,
+    activation = "linear",
+    bias_initializer = initializer_constant(0),
+    name = "log_sigma_final"
+  )
+
+gaussian_output_final <- layer_concatenate(
+  list(
+    mu_output_final,
+    log_sigma_output_final
+  )
+)
+
+gaussian_model_final <- keras_model(
+  inputs = gaussian_input_final,
+  outputs = gaussian_output_final
+)
+
+# compile
+
+gaussian_model_final |>
+  compile(
+    optimizer = optimizer_adam(
+      learning_rate = 0.0005
+    ),
+    loss = gaussian_nll
+  )
+
+# fit
+
+gaussian_history_final <- gaussian_model_final |>
+  fit(
+    x = X_train_final,
+    y = y_train_final,
+    epochs = 1,
+    batch_size = 32,
+    shuffle = FALSE,
+    verbose = 0
+  )
+
+gaussian_pred_train_final <- predict(
+  gaussian_model_final,
+  X_train_final
+)
+
+gaussian_pred_test_final <- predict(
+  gaussian_model_final,
+  X_test_final
+)
+
+mu_train_final <-
+  final_y_center +
+  final_y_scale *
+  gaussian_pred_train_final[, 1]
+
+mu_test_final <-
+  final_y_center +
+  final_y_scale *
+  gaussian_pred_test_final[, 1]
+
+
+sigma_train_final <-
+  final_y_scale *
+  exp(
+    gaussian_pred_train_final[, 2]
+  )
+
+sigma_test_final <-
+  final_y_scale *
+  exp(
+    gaussian_pred_test_final[, 2]
+  )
+
+tau <- 0.90
+z_tau <- qnorm(tau)
+
+threshold_train_final <-
+  mu_train_final +
+  z_tau * sigma_train_final
+
+threshold_test_final <-
+  mu_test_final +
+  z_tau * sigma_test_final
+
+loss_train_final <- train_raw$Y_loss
+loss_test_final <- test_raw$Y_loss
+
+is_exceedance_train_final <-
+  loss_train_final >
+  threshold_train_final
+
+excess_train_final <-
+  loss_train_final[
+    is_exceedance_train_final
+  ] -
+  threshold_train_final[
+    is_exceedance_train_final
+  ]
+
+X_gpd_train_final <- X_train_final[
+  is_exceedance_train_final,
+  ,
+  drop = FALSE
+]
+
+sum(is_exceedance_train_final)
+mean(is_exceedance_train_final)
+
+summary(excess_train_final)
+
+excess_scale_final <- mean(
+  excess_train_final
+)
+
+y_gpd_train_final <- matrix(
+  excess_train_final /
+    excess_scale_final,
+  ncol = 1
+)
+
+clear_session()
+set_random_seed(123)
+
+gpd_input_final <- keras_input(
+  shape = ncol(X_gpd_train_final),
+  name = "gpd_input_final"
+)
+
+gpd_hidden_final <- gpd_input_final |>
+  layer_dense(
+    units = 1,
+    activation = "relu"
+  )
+
+gpd_scale_output_final <- gpd_hidden_final |>
+  layer_dense(
+    units = 1,
+    activation = "softplus",
+    name = "gpd_scale_final"
+  )
+
+gpd_shape_output_final <- gpd_hidden_final |>
+  layer_dense(
+    units = 1,
+    activation = "tanh",
+    name = "gpd_shape_raw_final"
+  )
+
+gpd_output_final <- layer_concatenate(
+  list(
+    gpd_scale_output_final,
+    gpd_shape_output_final
+  )
+)
+
+gpd_model_final <- keras_model(
+  inputs = gpd_input_final,
+  outputs = gpd_output_final
+)
+
+# compile
+
+gpd_model_final |>
+  compile(
+    optimizer = optimizer_adam(
+      learning_rate = 0.0005
+    ),
+    loss = gpd_nll
+  )
+
+# fit
+gpd_history_final <- gpd_model_final |>
+  fit(
+    x = X_gpd_train_final,
+    y = y_gpd_train_final,
+    epochs = 24,
+    batch_size = 16,
+    shuffle = FALSE,
+    verbose = 0
+  )
+
+gpd_pred_test_final <- predict(
+  gpd_model_final,
+  X_test_final
+)
+
+beta_test_final <-
+  excess_scale_final *
+  gpd_pred_test_final[, 1]
+
+xi_test_final <-
+  0.5 *
+  gpd_pred_test_final[, 2]
+
+summary(beta_test_final)
+summary(xi_test_final)
+
+gpd_pred_train_final <- predict(
+  gpd_model_final,
+  X_gpd_train_final
+)
+
+beta_train_final <-
+  excess_scale_final *
+  gpd_pred_train_final[, 1]
+
+xi_train_final <-
+  0.5 *
+  gpd_pred_train_final[, 2]
+
+summary(beta_train_final)
+summary(xi_train_final)
+
+summary(beta_test_final)
+summary(xi_test_final)
+
+z_test_final <-
+  (loss_test_final - mu_test_final) /
+  sigma_test_final
+
+# Basic checks
+mean(z_test_final)
+sd(z_test_final)
+
+plot(
+  test_raw$Date,
+  z_test_final,
+  type = "l",
+  xlab = "Date",
+  ylab = "Standardized Residual",
+  main = "Gaussian Standardized Residuals on Test Set"
+)
+
+abline(
+  h = 0,
+  lty = 2
+)
+
+qqnorm(
+  z_test_final,
+  main = "Normal QQ Plot of Gaussian Standardized Residuals",
+  xlab = "Theoretical Standard Normal Quantiles",
+  ylab = "Observed Standardized Residual Quantiles"
+)
+
+qqline(
+  z_test_final,
+  lty = 2
+)
+
+acf(
+  z_test_final,
+  main = "ACF of Gaussian Standardized Residuals"
+)
+
+gpd_exp_resid <- ifelse(
+  abs(xi_train_final) < 1e-6,
+
+  excess_train_final /
+    beta_train_final,
+
+  log1p(
+    xi_train_final *
+      excess_train_final /
+      beta_train_final
+  ) /
+    xi_train_final
+)
+
+summary(gpd_exp_resid)
+
+n_gpd <- length(gpd_exp_resid)
+
+empirical_prob <- ppoints(n_gpd)
+
+model_prob <- pexp(
+  sort(gpd_exp_resid)
+)
+
+plot(
+  empirical_prob,
+  model_prob,
+  xlab = "Empirical Probability",
+  ylab = "Model Probability",
+  main = "GPD Probability Plot",
+  pch = 1,
+  asp = 1
+)
+
+abline(
+  a = 0,
+  b = 1,
+  lty = 2
+)
+
+theoretical_exp <- qexp(
+  ppoints(
+    length(gpd_exp_resid)
+  )
+)
+
+qqplot(
+  theoretical_exp,
+  gpd_exp_resid,
+  xlab = "Theoretical Standard Exponential Quantiles",
+  ylab = "Observed Transformed Excess Quantiles",
+  main = "GPD Standard Exponential QQ Plot",
+  pch = 1
+)
+
+abline(
+  a = 0,
+  b = 1,
+  lty = 2
+)
+
+z_sorted <- sort(
+  gpd_exp_resid
+)
+
+n_gpd <- length(
+  z_sorted
+)
+
+p_emp <- ppoints(
+  n_gpd
+)
+
+return_period <-
+  1 / (1 - p_emp)
+
+theoretical_return_level <-
+  qexp(p_emp)
+
+
+# 95% simulation envelope
+set.seed(123)
+
+n_sim <- 2000
+
+sim_ordered <- replicate(
+  n_sim,
+  sort(
+    rexp(n_gpd)
+  )
+)
+
+lower_envelope <- apply(
+  sim_ordered,
+  1,
+  quantile,
+  probs = 0.025
+)
+
+upper_envelope <- apply(
+  sim_ordered,
+  1,
+  quantile,
+  probs = 0.975
+)
+
+
+plot(
+  return_period,
+  z_sorted,
+  log = "x",
+  xlab = "Return Period (Exceedances)",
+  ylab = "Transformed Excess (Standard Exponential Scale)",
+  main = "GPD Standardized Return-Level Plot",
+  pch = 1,
+  ylim = range(
+    c(
+      z_sorted,
+      lower_envelope,
+      upper_envelope
+    )
+  )
+)
+
+lines(
+  return_period,
+  theoretical_return_level,
+  lwd = 2
+)
+
+lines(
+  return_period,
+  lower_envelope,
+  lty = 2
+)
+
+lines(
+  return_period,
+  upper_envelope,
+  lty = 2
+)
+
+legend(
+  "topleft",
+  legend = c(
+    "Theoretical Exp(1)",
+    "95% Simulation Envelope",
+    "Observed"
+  ),
+  lty = c(1, 2, NA),
+  pch = c(NA, NA, 1),
+  lwd = c(2, 1, NA),
+  bty = "n"
+)
+
+hist(
+  gpd_exp_resid,
+  probability = TRUE,
+  breaks = "FD",
+  xlab = "Transformed GPD Excess",
+  main = "GPD Standard Exponential Density"
+)
+
+curve(
+  dexp(x),
+  from = 0,
+  to = max(gpd_exp_resid),
+  add = TRUE,
+  lwd = 2
+)
+
+# GPD CDF for excess y >= 0
+gpd_cdf <- function(y, beta, xi) {
+
+  ifelse(
+    abs(xi) < 1e-6,
+    1 - exp(-y / beta),
+    1 - (1 + xi * y / beta)^(-1 / xi)
+  )
+}
+
+hybrid_cdf <- function(
+  loss,
+  mu,
+  sigma,
+  threshold,
+  beta,
+  xi,
+  tau = 0.90
+) {
+
+  if (loss <= threshold) {
+
+    pnorm(
+      loss,
+      mean = mu,
+      sd = sigma
+    )
+
+  } else {
+
+    excess <- loss - threshold
+
+    tau +
+      (1 - tau) *
+      gpd_cdf(
+        excess,
+        beta,
+        xi
+      )
+  }
+}
+
+# GPD density for excess y >= 0
+gpd_density <- function(y, beta, xi) {
+
+  out <- rep(0, length(y))
+
+  valid <- y >= 0
+
+  if (abs(xi) < 1e-6) {
+
+    out[valid] <-
+      exp(-y[valid] / beta) / beta
+
+  } else {
+
+    support <-
+      1 + xi * y[valid] / beta
+
+    temp <- rep(
+      0,
+      sum(valid)
+    )
+
+    ok <- support > 0
+
+    temp[ok] <-
+      (1 / beta) *
+      support[ok]^(-1 / xi - 1)
+
+    out[valid] <- temp
+  }
+
+  out
+}
+
+hybrid_density <- function(
+  loss,
+  mu,
+  sigma,
+  threshold,
+  beta,
+  xi,
+  tau = 0.90
+) {
+
+  density <- numeric(
+    length(loss)
+  )
+
+  body <-
+    loss <= threshold
+
+  density[body] <-
+    dnorm(
+      loss[body],
+      mean = mu,
+      sd = sigma
+    )
+
+  if (any(!body)) {
+
+    density[!body] <-
+      (1 - tau) *
+      gpd_density(
+        loss[!body] - threshold,
+        beta,
+        xi
+      )
+  }
+
+  density
+}
+
+test_results <- data.frame(
+  Date = test_raw$Date,
+  Loss = loss_test_final,
+  Mu = mu_test_final,
+  Sigma = sigma_test_final,
+  Threshold_90 = threshold_test_final,
+  Beta = beta_test_final,
+  Xi = xi_test_final
+)
+
+head(test_results)
+
+summary(test_results)
+
+# calculate VaR_95 and VaR_99
+
+hybrid_var <- function(
+  p,
+  threshold,
+  beta,
+  xi,
+  tau = 0.90
+) {
+
+  tail_ratio <-
+    (1 - p) /
+    (1 - tau)
+
+  ifelse(
+    abs(xi) < 1e-6,
+
+    threshold -
+      beta *
+      log(tail_ratio),
+
+    threshold +
+      beta / xi *
+      (
+        tail_ratio^(-xi) - 1
+      )
+  )
+}
+
+test_results$VaR_95 <- hybrid_var(
+  p = 0.95,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+test_results$VaR_99 <- hybrid_var(
+  p = 0.99,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+summary(test_results$VaR_95)
+summary(test_results$VaR_99)
+
+# calculate ES_95 and ES_99
+
+hybrid_es <- function(
+  var,
+  threshold,
+  beta,
+  xi
+) {
+
+  excess_var <-
+    var - threshold
+
+  threshold +
+    (
+      excess_var +
+      beta
+    ) /
+    (1 - xi)
+}
+
+test_results$ES_95 <- hybrid_es(
+  var = test_results$VaR_95,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+test_results$ES_99 <- hybrid_es(
+  var = test_results$VaR_99,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+summary(test_results$ES_95)
+summary(test_results$ES_99)
+
+# Use the test day with the highest 99% expected shortfall
+i_density <- which.max(
+  test_results$ES_99
+)
+
+loss_grid <- seq(
+  test_results$Mu[i_density] -
+    4 * test_results$Sigma[i_density],
+
+  max(
+    1.2 * test_results$VaR_99[i_density],
+    test_results$Threshold_90[i_density] +
+      5 * test_results$Beta[i_density]
+  ),
+
+  length.out = 1000
+)
+
+density_grid <- hybrid_density(
+  loss = loss_grid,
+  mu = test_results$Mu[i_density],
+  sigma = test_results$Sigma[i_density],
+  threshold = test_results$Threshold_90[i_density],
+  beta = test_results$Beta[i_density],
+  xi = test_results$Xi[i_density]
+)
+
+plot(
+  loss_grid,
+  density_grid,
+  type = "l",
+  lwd = 2,
+  xlab = "MSFT Loss",
+  ylab = "Conditional Density",
+  main = paste(
+    "MSFT Hybrid Conditional Density on",
+    test_results$Date[i_density]
+  )
+)
+
+abline(
+  v = test_results$Threshold_90[i_density],
+  lty = 2,
+  lwd = 2
+)
+
+abline(
+  v = test_results$Loss[i_density],
+  lty = 3
+)
+
+legend(
+  "topright",
+  legend = c(
+    "Hybrid Density",
+    "90% Threshold",
+    "Observed Loss"
+  ),
+  lty = c(1, 2, 3),
+  lwd = c(2, 2, 1),
+  bty = "n"
+)
+
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 10) + 0.1,
+  xpd = NA
+)
+
+plot(
+  test_results$Date,
+  test_results$Loss,
+  type = "l",
+  ylim = range(
+    c(
+      test_results$Loss,
+      test_results$VaR_95,
+      test_results$VaR_99
+    ),
+    finite = TRUE
+  ),
+  xlab = "Date",
+  ylab = "MSFT Loss",
+  main = "MSFT Conditional VaR on Test Set",
+  lwd = 1
+)
+
+lines(
+  test_results$Date,
+  test_results$VaR_95,
+  lwd = 2,
+  lty = 2
+)
+
+lines(
+  test_results$Date,
+  test_results$VaR_99,
+  lwd = 2,
+  lty = 3
+)
+
+legend(
+  "topright",
+  inset = c(-0.35, 0),
+  legend = c(
+    "Observed Loss",
+    "95% VaR",
+    "99% VaR"
+  ),
+  lty = c(1, 2, 3),
+  lwd = c(1, 2, 2),
+  bty = "n",
+  cex = 0.9
+)
+
+par(old_par)
+
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 10) + 0.1,
+  xpd = NA
+)
+
+plot(
+  test_results$Date,
+  test_results$ES_95,
+  type = "l",
+  ylim = range(
+    c(
+      test_results$ES_95,
+      test_results$ES_99
+    ),
+    finite = TRUE
+  ),
+  xlab = "Date",
+  ylab = "Expected Loss",
+  main = "MSFT Conditional Expected Shortfall on Test Set",
+  lwd = 2
+)
+
+lines(
+  test_results$Date,
+  test_results$ES_99,
+  lwd = 2,
+  lty = 2
+)
+
+legend(
+  "topright",
+  inset = c(-0.25, 0),
+  legend = c(
+    "95% ES",
+    "99% ES"
+  ),
+  lty = c(1, 2),
+  lwd = c(2, 2),
+  bty = "n",
+  cex = 0.9
+)
+
+par(old_par)
+
+# Ordering checks
+
+all(
+  test_results$VaR_95 >
+    test_results$Threshold_90
+)
+
+all(
+  test_results$VaR_99 >
+    test_results$VaR_95
+)
+
+all(
+  test_results$ES_95 >
+    test_results$VaR_95
+)
+
+all(
+  test_results$ES_99 >
+    test_results$VaR_99
+)
+
+
+# Test-set VaR exceedance rates
+
+mean(
+  test_results$Loss >
+    test_results$VaR_95
+)
+
+mean(
+  test_results$Loss >
+    test_results$VaR_99
+)
+
+# top 10 ES_99 dates
+
+test_results |>
+  arrange(
+    desc(ES_99)
+  ) |>
+  select(
+    Date,
+    Loss,
+    VaR_99,
+    ES_99,
+    Beta,
+    Xi
+  ) |>
+  head(10)
+
+
+# -------------------------------------------------------------------------
+# Derived quantities used only for the polished report
+# -------------------------------------------------------------------------
+
+# Central 95% conditional prediction interval from the fitted hybrid CDF.
+hybrid_quantile <- function(
+  p,
+  mu,
+  sigma,
+  threshold,
+  beta,
+  xi,
+  tau = 0.90
+) {
+  if (p <= tau) {
+    qnorm(
+      p,
+      mean = mu,
+      sd = sigma
+    )
+  } else {
+    tail_ratio <- (1 - p) / (1 - tau)
+
+    ifelse(
+      abs(xi) < 1e-6,
+      threshold - beta * log(tail_ratio),
+      threshold +
+        beta / xi *
+        (tail_ratio^(-xi) - 1)
+    )
+  }
+}
+
+test_results$PI95_Lower <- hybrid_quantile(
+  p = 0.025,
+  mu = test_results$Mu,
+  sigma = test_results$Sigma,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+test_results$PI95_Upper <- hybrid_quantile(
+  p = 0.975,
+  mu = test_results$Mu,
+  sigma = test_results$Sigma,
+  threshold = test_results$Threshold_90,
+  beta = test_results$Beta,
+  xi = test_results$Xi
+)
+
+test_results$Inside_PI95 <-
+  test_results$Loss >= test_results$PI95_Lower &
+  test_results$Loss <= test_results$PI95_Upper
+
+pi95_coverage <- mean(test_results$Inside_PI95)
+pi95_outside_n <- sum(!test_results$Inside_PI95)
+
+# Final VaR calibration.
+var95_exceed_rate <- mean(
+  test_results$Loss > test_results$VaR_95
+)
+
+var99_exceed_rate <- mean(
+  test_results$Loss > test_results$VaR_99
+)
+
+var95_exceed_n <- sum(
+  test_results$Loss > test_results$VaR_95
+)
+
+var99_exceed_n <- sum(
+  test_results$Loss > test_results$VaR_99
+)
+
+# Four representative test dates for comparing hybrid conditional densities.
+# Two dates have the largest observed losses; the other two represent a
+# typical observed loss and the smallest observed loss.
+loss_order_desc <- order(
+  test_results$Loss,
+  decreasing = TRUE
+)
+
+density_example_index <- c(
+  loss_order_desc[1],
+  loss_order_desc[2],
+  which.min(
+    abs(
+      test_results$Loss -
+        median(test_results$Loss)
+    )
+  ),
+  which.min(test_results$Loss)
+)
+
+density_example_labels <- LETTERS[1:4]
+density_example_roles <- c(
+  "Largest observed loss",
+  "Second-largest observed loss",
+  "Typical observed loss",
+  "Smallest observed loss"
+)
+
+# Numerical normalization checks for the four displayed hybrid densities.
+density_area_examples <- vapply(
+  density_example_index,
+  function(i) {
+    integrate(
+      function(x) {
+        hybrid_density(
+          loss = x,
+          mu = test_results$Mu[i],
+          sigma = test_results$Sigma[i],
+          threshold = test_results$Threshold_90[i],
+          beta = test_results$Beta[i],
+          xi = test_results$Xi[i]
+        )
+      },
+      lower = -Inf,
+      upper = Inf,
+      subdivisions = 2000
+    )$value
+  },
+  numeric(1)
+)
+
+density_example_table <- data.frame(
+  Panel = density_example_labels,
+  Selection = density_example_roles,
+  Date = test_results$Date[density_example_index],
+  Observed_Loss = test_results$Loss[density_example_index],
+  Threshold_90 = test_results$Threshold_90[density_example_index],
+  VaR_99 = test_results$VaR_99[density_example_index],
+  ES_99 = test_results$ES_99[density_example_index]
+)
+
+# Largest GPD standardized residual and corresponding original observation.
+exceedance_indices_final <- which(
+  is_exceedance_train_final
+)
+
+exceedance_dates_final <-
+  train_raw$Date[
+    is_exceedance_train_final
+  ]
+
+i_gpd_outlier <- which.max(
+  gpd_exp_resid
+)
+
+gpd_outlier_original_index <-
+  exceedance_indices_final[
+    i_gpd_outlier
+  ]
+
+gpd_outlier_table <- data.frame(
+  Date =
+    train_raw$Date[
+      gpd_outlier_original_index
+    ],
+  Loss =
+    loss_train_final[
+      gpd_outlier_original_index
+    ],
+  Mu =
+    mu_train_final[
+      gpd_outlier_original_index
+    ],
+  Sigma =
+    sigma_train_final[
+      gpd_outlier_original_index
+    ],
+  Threshold =
+    threshold_train_final[
+      gpd_outlier_original_index
+    ],
+  Excess =
+    excess_train_final[
+      i_gpd_outlier
+    ],
+  Beta =
+    beta_train_final[
+      i_gpd_outlier
+    ],
+  Xi =
+    xi_train_final[
+      i_gpd_outlier
+    ],
+  ExpResidual =
+    gpd_exp_resid[
+      i_gpd_outlier
+    ]
+)
+
+gpd_resid_rank <- data.frame(
+  Date = exceedance_dates_final,
+  ExpResidual = gpd_exp_resid
+) |>
+  arrange(
+    desc(ExpResidual)
+  )
+
+highest_risk_dates <- test_results |>
+  arrange(
+    desc(ES_99)
+  ) |>
+  select(
+    Date,
+    Loss,
+    VaR_99,
+    ES_99,
+    Beta,
+    Xi
+  ) |>
+  head(5)
+
+# Restore a standard graphics state after all hidden analysis chunks.
+par(
+  mfrow = c(1, 1),
+  mar = c(5.1, 4.1, 4.1, 2.1),
+  xpd = FALSE
+)
+
+```
+
+**Supervisor:** Dr. Jordan Richards, Lecturer in Statistics, School of Mathematics, University of Edinburgh
+
+# Abstract {-}
+
+This project develops a neural-network-based hybrid model for conditional equity tail risk. Microsoft (MSFT) daily losses are modeled using a Gaussian distribution for the central body and a generalized Pareto distribution (GPD) for losses exceeding an observation-specific conditional 90% threshold. Neural networks allow the Gaussian location and scale and the GPD tail parameters to vary with lagged cross-asset returns, log trading volumes, and calendar effects. Model selection is performed using a chronological validation sample, after which the selected models are refitted on the full training period. The resulting conditional distribution is used to construct prediction intervals and estimate Value-at-Risk (VaR) and Expected Shortfall (ES). Out-of-sample diagnostics indicate reasonable calibration, while residual analyses highlight the challenge posed by isolated event-driven market shocks.
+
+# Introduction
+
+Extreme financial losses are rare by construction, but they have disproportionate consequences for risk management because quantities such as Value-at-Risk (VaR) and Expected Shortfall (ES) are determined by the tail rather than by typical returns. Financial returns also exhibit time-varying volatility and heavier tails than a single Gaussian distribution can represent, so a model that describes the center of the distribution well can still understate the probability or severity of rare losses. Extreme value theory (EVT) provides a principled framework for extrapolating beyond high thresholds and has long been used to estimate tail-related financial risk measures (McNeil and Frey, 2000; Coles, 2001).
+
+Nevertheless, classical EVT models can be restrictive when tail behavior changes with a large set of market predictors. Neural networks provide flexible nonlinear maps from covariates to distributional parameters. Recent work has therefore combined deep learning with generalized Pareto modeling so that thresholds and/or GPD parameters can adapt to high-dimensional covariate information while retaining an EVT-motivated form for the extreme tail (Wilson et al., 2022; Richards et al., 2023). Hybrid body--tail approaches similarly combine probabilistic machine learning for the central part of a distribution with EVT for rare extremes (Carreau and Bengio, 2007, 2009; Ahuja et al., 2026).
+
+The objective of this project is to combine these ideas into a conditional density model for Microsoft (MSFT) losses that can adapt to market conditions and produce interpretable tail-risk measures. The response is Microsoft daily loss,
+
+\[
+L_t=-r_t,
+\]
+
+where $r_t$ denotes the MSFT daily log return. Thus, unusually large positive values of $L_t$ correspond to severe negative returns. The model is designed to estimate the full conditional distribution of $L_t$ and, in particular, its upper tail.
+
+# Data and predictor construction
+
+The dataset contains daily observations for ten U.S. equities over `r format(min(stock_model$Date), "%Y-%m-%d")` to `r format(max(stock_model$Date), "%Y-%m-%d")`. The predictor set uses one- through five-trading-day lags of returns and trading volumes for all ten equities. Trading volume is transformed as $\log(1+\text{Volume})$ before lag construction to reduce skewness and limit unstable extrapolation from unusually large raw-volume observations. Day-of-week indicators are included as additional predictors.
+
+This produces 100 continuous lagged predictors before weekday encoding:
+
+\[
+10\text{ equities}\times 5\text{ lags}\times
+(\text{return}+\text{log-volume})=100.
+\]
+
+Because the data form a time series, all splits preserve chronological order. The last 10% of observations are held out as the test period. Within the remaining training period, the last 10% is used as a validation sample for architecture and epoch selection. Standardization parameters are estimated only from the relevant training portion and then applied forward in time.
+
+```{r split-table, results='asis'}
+split_table <- data.frame(
+  Sample = c("Subtraining", "Validation", "Test"),
+  Dates = c(
+    paste(
+      format(min(subtrain_raw$Date), "%Y-%m-%d"),
+      "to",
+      format(max(subtrain_raw$Date), "%Y-%m-%d")
+    ),
+    paste(
+      format(min(validation_raw$Date), "%Y-%m-%d"),
+      "to",
+      format(max(validation_raw$Date), "%Y-%m-%d")
+    ),
+    paste(
+      format(min(test_raw$Date), "%Y-%m-%d"),
+      "to",
+      format(max(test_raw$Date), "%Y-%m-%d")
+    )
+  ),
+  N = c(
+    nrow(subtrain_raw),
+    nrow(validation_raw),
+    nrow(test_raw)
+  )
+)
+
+knitr::kable(
+  split_table,
+  caption = "Chronological samples used for model development and evaluation.",
+  booktabs = TRUE
+)
+```
+
+# Exploratory evidence for a heavy upper tail
+
+Before constructing the conditional model, marginal MSFT tail diagnostics were examined on the training data. These diagnostics are not used directly to estimate the final conditional threshold; rather, they provide supporting evidence that an EVT tail is appropriate and help assess the stability of the GPD shape parameter across conventional fixed thresholds.
+
+## 3.1 Shape stability across thresholds
+
+The shape parameter $\xi$ controls GPD tail heaviness. Stability across a range of sufficiently high thresholds supports the use of a GPD approximation, whereas erratic estimates at very high thresholds can reflect the small number of remaining exceedances.
+
+```{r shape-stability, fig.height=4.5, fig.cap="MSFT marginal GPD shape estimates across candidate thresholds."}
+plot(
+  msft_threshold_results$Threshold_Probability,
+  msft_threshold_results$Shape,
+  type = "b",
+  pch = 19,
+  ylim = range(
+    c(
+      msft_threshold_results$Shape_Lower_95,
+      msft_threshold_results$Shape_Upper_95
+    ),
+    na.rm = TRUE
+  ),
+  xlab = "Threshold Quantile",
+  ylab = "Estimated Shape Parameter",
+  main = "MSFT GPD Shape Stability"
+)
+
+arrows(
+  x0 = msft_threshold_results$Threshold_Probability,
+  y0 = msft_threshold_results$Shape_Lower_95,
+  x1 = msft_threshold_results$Threshold_Probability,
+  y1 = msft_threshold_results$Shape_Upper_95,
+  angle = 90,
+  code = 3,
+  length = 0.03
+)
+
+abline(
+  h = 0,
+  lty = 2
+)
+```
+
+The estimates are relatively stable over a substantial portion of the candidate threshold range, while uncertainty increases toward the most extreme thresholds because fewer observations remain. This is consistent with the usual bias--variance trade-off in threshold selection.
+
+## 3.2 Mean excess behavior
+
+For a GPD tail, the mean excess function is approximately linear above a sufficiently high threshold. The plot below is therefore used as an additional qualitative check on whether the upper-loss tail behaves in a manner compatible with a GPD approximation.
+
+```{r mean-excess, fig.height=4.5, fig.cap="Mean excess of MSFT training losses across candidate thresholds."}
+plot(
+  mean_excess_results$Threshold,
+  mean_excess_results$MeanExcess,
+  type = "b",
+  pch = 19,
+  xlab = "Loss Threshold",
+  ylab = "Mean Excess",
+  main = "MSFT Mean Excess Plot"
+)
+```
+
+# Hybrid conditional Gaussian--GPD model
+
+## 4.1 Gaussian body
+
+Let $X_t$ denote the predictor vector available before observing the loss on day $t$. The central part of the conditional loss distribution is represented by a Gaussian location--scale model,
+
+\[
+L_t\mid X_t \sim N\!\left(\mu_t,\sigma_t^2\right),
+\qquad
+\mu_t=\mu(X_t),\quad
+\sigma_t=\sigma(X_t)>0,
+\]
+
+where $\mu(X_t)$ and $\log\sigma(X_t)$ are outputs of a feed-forward neural network. Predicting log-standard-deviation and exponentiating the output enforces positivity of $\sigma_t$.
+
+The Gaussian network is estimated by minimizing the conditional negative log-likelihood,
+
+\[
+\ell_t^{(G)}=
+\log \sigma_t+
+\frac{1}{2}
+\left(
+\frac{L_t-\mu_t}{\sigma_t}
+\right)^2,
+\]
+
+up to an additive constant.
+
+## 4.2 Observation-specific tail threshold
+
+Rather than using a single fixed loss threshold, the upper-tail threshold changes with the predicted conditional mean and volatility:
+
+\[
+u_t
+=
+\mu_t+
+\Phi^{-1}(\tau)\sigma_t,
+\qquad \tau=0.90.
+\]
+
+Thus, the definition of an extreme loss adapts to market conditions. A loss is passed to the EVT component when $L_t>u_t$.
+
+The selected Gaussian specification uses two hidden layers with 16 units per layer and one training epoch. On the validation period, the observed exceedance proportion was `r sprintf("%.2f%%", 100 * mean(is_exceedance_validation))`, close to the nominal 10% tail probability.
+
+```{r validation-threshold, fig.height=4.7, fig.cap="Observed validation losses, conditional 90% thresholds, and exceedances."}
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 13) + 0.1
+)
+
+step2_ylim <- range(
+  c(
+    loss_validation,
+    threshold_validation
+  ),
+  finite = TRUE
+)
+
+plot(
+  validation_raw$Date,
+  loss_validation,
+  type = "l",
+  ylim = step2_ylim,
+  xlab = "Date",
+  ylab = "MSFT Loss",
+  main = "Validation-Set Loss and Conditional 90% Threshold",
+  lwd = 1,
+  col = cb_black
+)
+
+lines(
+  validation_raw$Date,
+  threshold_validation,
+  lwd = 2,
+  lty = 2,
+  col = cb_blue
+)
+
+points(
+  validation_raw$Date[is_exceedance_validation],
+  loss_validation[is_exceedance_validation],
+  pch = 19,
+  col = cb_vermillion
+)
+
+usr <- par("usr")
+
+legend(
+  x = usr[2] + 0.04 * (usr[2] - usr[1]),
+  y = usr[4],
+  legend = c(
+    "Observed Loss",
+    "Conditional 90% Threshold",
+    "Exceedance"
+  ),
+  lty = c(1, 2, NA),
+  lwd = c(1, 2, NA),
+  pch = c(NA, NA, 19),
+  col = c(cb_black, cb_blue, cb_vermillion),
+  bty = "n",
+  xjust = 0,
+  yjust = 1,
+  xpd = NA,
+  cex = 0.85
+)
+
+par(old_par)
+```
+
+The threshold rises and falls with the network's predicted conditional risk, so a loss classified as extreme on a relatively calm day need not be extreme under a high-volatility state.
+
+## 4.3 Conditional GPD tail
+
+For threshold exceedances, define the excess loss
+
+\[
+Y_t=L_t-u_t,\qquad L_t>u_t.
+\]
+
+Conditional on $X_t$, the excess is modeled as a generalized Pareto random variable,
+
+\[
+Y_t\mid (L_t>u_t,X_t)
+\sim
+\operatorname{GPD}(\beta_t,\xi_t),
+\]
+
+with scale $\beta_t>0$ and shape $\xi_t$. For $y\ge0$ and $1+\xi_t y/\beta_t>0$, the GPD CDF is
+
+\[
+G_t(y)
+=
+1-
+\left(
+1+\xi_t\frac{y}{\beta_t}
+\right)^{-1/\xi_t},
+\]
+
+with the exponential limit $G_t(y)=1-\exp(-y/\beta_t)$ when $\xi_t\to0$. This peaks-over-threshold representation is the standard EVT approximation for sufficiently high exceedances (Coles, 2001). Neural-network parameterizations of GPD components have also been used in recent deep-learning approaches to extremes (Wilson et al., 2022; Richards et al., 2023).
+
+Because only threshold exceedances are available for tail fitting, the GPD network is intentionally much smaller than the Gaussian network. The selected model uses one hidden ReLU unit and 24 epochs. The shape output is constrained to $(-0.5,0.5)$, which stabilizes estimation and ensures finite conditional means for the fitted tail.
+
+# Model selection and final refit
+
+Model selection is performed using the subtraining and validation periods only. Several compact Gaussian architectures were compared around the two-layer, 16-unit baseline, and the selected Gaussian model achieved validation calibration close to the nominal 90% threshold. For the GPD network, the one-hidden-unit model produced the lowest validation loss among the compact specifications considered; larger tail networks were less stable because the GPD is estimated from only the threshold exceedances.
+
+After these choices were fixed, preprocessing parameters were recomputed on the full training sample, the Gaussian model was refitted, conditional thresholds and training exceedances were regenerated, and the GPD model was then refitted on those final exceedances. Within the final refit, model parameters are estimated from the training sample only, and the test period is used for conditional prediction and final assessment.
+
+```{r selected-model-table, results='asis'}
+model_table <- data.frame(
+  Component = c(
+    "Gaussian body",
+    "Tail threshold",
+    "GPD tail"
+  ),
+  Selected_specification = c(
+    "Two ReLU hidden layers: 16 -> 16; 1 epoch",
+    "Conditional Gaussian 90th percentile",
+    "One ReLU hidden unit; 24 epochs"
+  )
+)
+
+knitr::kable(
+  model_table,
+  caption = "Selected model specifications used in the final refit.",
+  booktabs = TRUE
+)
+```
+
+# Final model diagnostics
+
+The final diagnostics assess different aspects of the fitted conditional distribution. Gaussian standardized residuals test the adequacy of the predicted body location and scale, while transformed GPD residuals assess the conditional tail fit.
+
+## 6.1 Gaussian standardized residuals
+
+For the Gaussian component, define
+
+\[
+Z_t=
+\frac{L_t-\hat\mu_t}{\hat\sigma_t}.
+\]
+
+If the conditional Gaussian location and scale are well calibrated, $Z_t$ should be approximately standard Normal, with mean 0, standard deviation 1, little systematic time structure, and weak serial dependence. On the test period, the residual mean is `r sprintf("%.3f", mean(z_test_final))` and the residual standard deviation is `r sprintf("%.3f", sd(z_test_final))`.
+
+### Residuals over time
+
+```{r gaussian-residual-time, fig.cap="Standardized Gaussian residuals over the held-out test period."}
+plot(
+  test_raw$Date,
+  z_test_final,
+  type = "l",
+  xlab = "Date",
+  ylab = "Standardized Residual",
+  main = "Gaussian Standardized Residuals on Test Set"
+)
+
+abline(
+  h = 0,
+  lty = 2
+)
+```
+
+The residuals fluctuate around zero without a persistent temporal trend. Several isolated large residuals remain, as expected when the Gaussian component is used primarily to represent the distributional body rather than the far tail.
+
+### Normal QQ plot
+
+```{r gaussian-qq, fig.cap="Normal QQ plot of final Gaussian standardized residuals."}
+qqnorm(
+  z_test_final,
+  main = "Normal QQ Plot of Gaussian Standardized Residuals",
+  xlab = "Theoretical Standard Normal Quantiles",
+  ylab = "Observed Standardized Residual Quantiles"
+)
+
+qqline(
+  z_test_final,
+  lty = 2
+)
+```
+
+The central portion follows the Normal reference reasonably closely, while the extreme tails depart from the line. This is consistent with the motivation for separating the upper tail from the Gaussian body and modeling it with EVT.
+
+### Residual autocorrelation
+
+```{r gaussian-acf, fig.cap="Autocorrelation function of final Gaussian standardized residuals."}
+acf(
+  z_test_final,
+  main = "ACF of Gaussian Standardized Residuals"
+)
+```
+
+Most sample autocorrelations are small and lie within the approximate confidence bands, suggesting little remaining systematic serial dependence after conditioning on the lagged predictors.
+
+## 6.2 Conditional GPD diagnostics
+
+For a fitted GPD, each excess can be transformed to a standard exponential scale. For $\xi_t\ne0$,
+
+\[
+E_t=
+\frac{1}{\xi_t}
+\log\left(
+1+\xi_t\frac{Y_t}{\beta_t}
+\right),
+\]
+
+with $E_t=Y_t/\beta_t$ in the exponential limit $\xi_t=0$. Under a well-calibrated conditional GPD, the transformed residuals should approximately follow $\operatorname{Exp}(1)$.
+
+### Probability plot
+
+The probability plot emphasizes overall distributional calibration: points close to the 45-degree line indicate agreement between empirical transformed probabilities and the fitted standard exponential reference.
+
+```{r gpd-probability, fig.cap="Probability plot for standard-exponential transformed GPD residuals."}
+n_gpd_plot <- length(gpd_exp_resid)
+
+empirical_prob_plot <- ppoints(
+  n_gpd_plot
+)
+
+model_prob_plot <- pexp(
+  sort(gpd_exp_resid)
+)
+
+plot(
+  empirical_prob_plot,
+  model_prob_plot,
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  xlab = "Empirical Probability",
+  ylab = "Model Probability",
+  main = "GPD Probability Plot",
+  pch = 1
+)
+
+abline(
+  a = 0,
+  b = 1,
+  lty = 2
+)
+```
+
+The plot is close to the reference line over most of the probability range, indicating reasonable overall tail calibration.
+
+### Standard exponential QQ plot
+
+The QQ plot is more sensitive to the magnitudes of the largest exceedances and is therefore particularly informative about far-tail fit.
+
+```{r gpd-qq, fig.cap="Standard-exponential QQ plot for the conditional GPD tail."}
+theoretical_exp_plot <- qexp(
+  ppoints(
+    length(gpd_exp_resid)
+  )
+)
+
+qqplot(
+  theoretical_exp_plot,
+  gpd_exp_resid,
+  xlab = "Theoretical Standard Exponential Quantiles",
+  ylab = "Observed Transformed Excess Quantiles",
+  main = "GPD Standard Exponential QQ Plot",
+  pch = 1
+)
+
+abline(
+  a = 0,
+  b = 1,
+  lty = 2
+)
+```
+
+Most transformed exceedances remain reasonably close to the reference line, but the largest observation is substantially more extreme than predicted. The maximum transformed residual is `r sprintf("%.2f", max(gpd_exp_resid))`, compared with `r sprintf("%.2f", gpd_resid_rank$ExpResidual[2])` for the second-largest observation, indicating that the visible upper-tail departure is largely driven by one event.
+
+### Standardized return-level plot
+
+The return-level view expresses the same transformed tail behavior on a return-period scale. The simulation envelope provides a reference for the sampling variability expected from a standard exponential sample of the same size.
+
+```{r gpd-return-level, fig.height=5.0, fig.cap="Standardized return-level diagnostic with a 95% simulation envelope."}
+z_sorted_plot <- sort(
+  gpd_exp_resid
+)
+
+n_gpd_plot <- length(
+  z_sorted_plot
+)
+
+p_emp_plot <- ppoints(
+  n_gpd_plot
+)
+
+return_period_plot <-
+  1 / (1 - p_emp_plot)
+
+theoretical_return_level_plot <-
+  qexp(p_emp_plot)
+
+set.seed(123)
+
+n_sim_plot <- 2000
+
+sim_ordered_plot <- replicate(
+  n_sim_plot,
+  sort(
+    rexp(n_gpd_plot)
+  )
+)
+
+lower_envelope_plot <- apply(
+  sim_ordered_plot,
+  1,
+  quantile,
+  probs = 0.025
+)
+
+upper_envelope_plot <- apply(
+  sim_ordered_plot,
+  1,
+  quantile,
+  probs = 0.975
+)
+
+plot(
+  return_period_plot,
+  z_sorted_plot,
+  log = "x",
+  xlab = "Return Period (Exceedances)",
+  ylab = "Transformed Excess (Standard Exponential Scale)",
+  main = "GPD Standardized Return-Level Plot",
+  pch = 1,
+  ylim = range(
+    c(
+      z_sorted_plot,
+      lower_envelope_plot,
+      upper_envelope_plot
+    )
+  )
+)
+
+lines(
+  return_period_plot,
+  theoretical_return_level_plot,
+  lwd = 2
+)
+
+lines(
+  return_period_plot,
+  lower_envelope_plot,
+  lty = 2
+)
+
+lines(
+  return_period_plot,
+  upper_envelope_plot,
+  lty = 2
+)
+
+legend(
+  "topleft",
+  legend = c(
+    "Theoretical Exp(1)",
+    "95% Simulation Envelope",
+    "Observed"
+  ),
+  lty = c(1, 2, NA),
+  pch = c(NA, NA, 1),
+  lwd = c(2, 1, NA),
+  bty = "n",
+  cex = 0.85
+)
+```
+
+Most observations follow the expected return-level relationship, while the most extreme transformed excess lies well above the central theoretical curve and illustrates the uncertainty associated with isolated far-tail events.
+
+### Density diagnostic
+
+```{r gpd-density, fig.cap="Empirical density of transformed GPD residuals with the Exp(1) reference density."}
+hist(
+  gpd_exp_resid,
+  probability = TRUE,
+  breaks = "FD",
+  xlab = "Transformed GPD Excess",
+  main = "GPD Standard Exponential Density"
+)
+
+curve(
+  dexp(x),
+  from = 0,
+  to = max(gpd_exp_resid),
+  add = TRUE,
+  lwd = 2
+)
+```
+
+The empirical distribution broadly follows the standard exponential shape, with the isolated largest residual producing the far-right observation.
+
+## 6.3 Investigation of the largest GPD residual
+
+The strongest diagnostic departure occurs on **`r format(gpd_outlier_table$Date[1], "%Y-%m-%d")`**. On this date, the observed MSFT loss was `r sprintf("%.4f", gpd_outlier_table$Loss[1])`, compared with a conditional 90% threshold of `r sprintf("%.4f", gpd_outlier_table$Threshold[1])`. The excess loss was therefore `r sprintf("%.4f", gpd_outlier_table$Excess[1])`, while the predicted GPD scale was only `r sprintf("%.4f", gpd_outlier_table$Beta[1])`, producing a standard-exponential residual of `r sprintf("%.2f", gpd_outlier_table$ExpResidual[1])`.
+
+This observation corresponds to a real event-driven market shock rather than an apparent data error. Microsoft released fiscal 2015 second-quarter results after the market close on January 26, 2015, reporting quarterly revenue of $26.5 billion. On January 27, Microsoft shares fell approximately 9.3% after investors reacted negatively to the company's outlook; contemporary reporting cited weaker PC-market conditions and the effect of a strong U.S. dollar. The event is therefore a useful stress case: the GPD accommodates a much heavier tail than the Gaussian body, but an unusually severe earnings-related shock can still be extreme relative to the fitted conditional tail.
+
+```{r gpd-outlier-table, results='asis'}
+gpd_outlier_display <- gpd_outlier_table
+gpd_outlier_display$Date <- format(
+  gpd_outlier_display$Date,
+  "%Y-%m-%d"
+)
+
+numeric_cols <- setdiff(
+  names(gpd_outlier_display),
+  "Date"
+)
+
+gpd_outlier_display[numeric_cols] <- lapply(
+  gpd_outlier_display[numeric_cols],
+  function(x) round(x, 4)
+)
+
+knitr::kable(
+  gpd_outlier_display,
+  caption = "Largest standardized GPD residual and its fitted conditional parameters.",
+  booktabs = TRUE
+)
+```
+
+# Hybrid conditional distribution
+
+The Gaussian body and conditional GPD tail are combined into one conditional CDF. Let $G_t$ denote the fitted GPD CDF and let $\tau=0.90$. Then
+
+\[
+F_t(\ell)=
+\begin{cases}
+\Phi\!\left(
+\dfrac{\ell-\mu_t}{\sigma_t}
+\right),
+& \ell\le u_t,\\[8pt]
+\tau+
+(1-\tau)
+G_t(\ell-u_t),
+& \ell>u_t.
+\end{cases}
+\]
+
+Because $u_t$ is the conditional Gaussian $\tau$-quantile,
+
+\[
+\Phi\!\left(
+\frac{u_t-\mu_t}{\sigma_t}
+\right)=\tau,
+\]
+
+so the CDF joins continuously at the threshold.
+
+The corresponding density is
+
+\[
+f_t(\ell)=
+\begin{cases}
+\dfrac{1}{\sigma_t}
+\phi\!\left(
+\dfrac{\ell-\mu_t}{\sigma_t}
+\right),
+& \ell\le u_t,\\[10pt]
+(1-\tau)g_t(\ell-u_t),
+& \ell>u_t.
+\end{cases}
+\]
+
+The Gaussian part integrates to $\tau=0.90$, and the weighted GPD tail integrates to $1-\tau=0.10$; therefore the complete density integrates to one. For the four examples shown below, numerical integration gives total probability masses between `r sprintf("%.6f", min(density_area_examples))` and `r sprintf("%.6f", max(density_area_examples))`.
+
+The present construction enforces CDF continuity but does **not** force the density to be continuous at $u_t$. The visible jump at the splice point is therefore a feature of the chosen construction rather than a normalization error.
+
+## 7.1 Conditional densities across selected test dates
+
+To illustrate how the fitted conditional distribution changes with the realized market outcome, four test dates are selected: the two dates with the largest observed losses, a date with an observed loss closest to the test-period median, and the date with the smallest observed loss. The panels use a common horizontal and vertical scale to make changes in location, spread, threshold, and tail shape directly comparable. In each panel, the dashed vertical line is the conditional 90% threshold and the dotted vertical line is the observed loss. The labels A--D are reused in Figure 12.
+
+```{r hybrid-density-plot, fig.height=7.3, fig.cap="Four fitted hybrid conditional densities for test dates spanning very high, typical, and low observed MSFT losses. Dashed vertical lines show conditional 90% thresholds; dotted vertical lines show observed losses."}
+selected_mu <- test_results$Mu[density_example_index]
+selected_sigma <- test_results$Sigma[density_example_index]
+selected_threshold <- test_results$Threshold_90[density_example_index]
+selected_beta <- test_results$Beta[density_example_index]
+selected_var99 <- test_results$VaR_99[density_example_index]
+selected_loss <- test_results$Loss[density_example_index]
+
+loss_grid_report <- seq(
+  min(
+    selected_mu - 4 * selected_sigma,
+    selected_loss
+  ),
+  max(
+    1.2 * selected_var99,
+    selected_threshold + 5 * selected_beta,
+    selected_loss
+  ),
+  length.out = 1000
+)
+
+density_curves_report <- lapply(
+  density_example_index,
+  function(i) {
+    hybrid_density(
+      loss = loss_grid_report,
+      mu = test_results$Mu[i],
+      sigma = test_results$Sigma[i],
+      threshold = test_results$Threshold_90[i],
+      beta = test_results$Beta[i],
+      xi = test_results$Xi[i]
+    )
+  }
+)
+
+density_ymax_report <- max(
+  unlist(density_curves_report),
+  finite = TRUE
+)
+
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mfrow = c(2, 2),
+  mar = c(4.2, 4.2, 3.2, 1.0) + 0.1
+)
+
+for (j in seq_along(density_example_index)) {
+  i <- density_example_index[j]
+
+  plot(
+    loss_grid_report,
+    density_curves_report[[j]],
+    type = "l",
+    lwd = 2,
+    col = cb_black,
+    ylim = c(0, density_ymax_report),
+    xlab = "MSFT Loss",
+    ylab = "Conditional Density",
+    main = paste0(
+      density_example_labels[j],
+      ": ",
+      format(test_results$Date[i], "%Y-%m-%d")
+    )
+  )
+
+  abline(
+    v = test_results$Threshold_90[i],
+    lty = 2,
+    lwd = 2,
+    col = cb_blue
+  )
+
+  abline(
+    v = test_results$Loss[i],
+    lty = 3,
+    lwd = 1.5,
+    col = cb_vermillion
+  )
+}
+
+par(old_par)
+```
+
+```{r hybrid-density-table, results='asis'}
+density_example_display <- density_example_table
+
+density_example_display$Observed_Loss <- round(
+  density_example_display$Observed_Loss,
+  4
+)
+density_example_display$Threshold_90 <- round(
+  density_example_display$Threshold_90,
+  4
+)
+density_example_display$VaR_99 <- round(
+  density_example_display$VaR_99,
+  4
+)
+density_example_display$ES_99 <- round(
+  density_example_display$ES_99,
+  4
+)
+
+knitr::kable(
+  density_example_display,
+  caption = "Selected test dates used for the four hybrid-density examples.",
+  booktabs = TRUE
+)
+```
+
+The two high-loss examples show the fitted distribution on days when large downside moves were actually realized, whereas the typical and low-loss examples provide a contrast with more ordinary outcomes. Differences across the four panels reflect changes in the covariate-dependent Gaussian location and scale as well as in the GPD tail parameters; the realized loss itself is not used to fit that day's conditional density.
+
+# Out-of-sample risk results
+
+## 8.1 Central 95% conditional prediction interval
+
+A central 95% conditional prediction interval is formed from the 2.5% and 97.5% quantiles of the fitted hybrid distribution,
+
+\[
+\mathcal{I}_t^{0.95}
+=
+\left[
+F_t^{-1}(0.025),
+F_t^{-1}(0.975)
+\right].
+\]
+
+Because 2.5% lies in the Gaussian body whereas 97.5% lies above the 90% splice threshold, the lower endpoint is determined by the Gaussian component and the upper endpoint incorporates the GPD tail.
+
+```{r prediction-interval, fig.height=4.8, fig.cap="Central 95% conditional prediction interval over the held-out test period. Labels A--D identify the four dates used in Figure 11."}
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 13) + 0.1
+)
+
+pi_ylim_report <- range(
+  c(
+    test_results$Loss,
+    test_results$PI95_Lower,
+    test_results$PI95_Upper
+  ),
+  finite = TRUE
+)
+
+plot(
+  test_results$Date,
+  test_results$Loss,
+  type = "l",
+  ylim = pi_ylim_report,
+  xlab = "Date",
+  ylab = "MSFT Loss",
+  main = "MSFT 95% Conditional Prediction Interval on Test Set",
+  lwd = 1,
+  col = cb_black
+)
+
+lines(
+  test_results$Date,
+  test_results$PI95_Lower,
+  lty = 2,
+  lwd = 2,
+  col = cb_blue
+)
+
+lines(
+  test_results$Date,
+  test_results$PI95_Upper,
+  lty = 2,
+  lwd = 2,
+  col = cb_blue
+)
+
+outside_95_report <- !test_results$Inside_PI95
+
+points(
+  test_results$Date[outside_95_report],
+  test_results$Loss[outside_95_report],
+  pch = 19,
+  col = cb_vermillion
+)
+
+# Highlight the dates used for the four hybrid-density examples.
+points(
+  test_results$Date[density_example_index],
+  test_results$Loss[density_example_index],
+  pch = 21,
+  col = cb_black,
+  bg = "white",
+  cex = 1.5,
+  lwd = 1.5
+)
+
+text(
+  test_results$Date[density_example_index],
+  test_results$Loss[density_example_index],
+  labels = density_example_labels,
+  pos = 3,
+  offset = 0.45,
+  cex = 0.75,
+  col = cb_black
+)
+
+usr <- par("usr")
+
+legend(
+  x = usr[2] + 0.04 * (usr[2] - usr[1]),
+  y = usr[4],
+  legend = c(
+    "Observed Loss",
+    "95% Prediction Limits",
+    "Outside Interval"
+  ),
+  lty = c(1, 2, NA),
+  lwd = c(1, 2, NA),
+  pch = c(NA, NA, 19),
+  col = c(cb_black, cb_blue, cb_vermillion),
+  bty = "n",
+  xjust = 0,
+  yjust = 1,
+  xpd = NA,
+  cex = 0.85
+)
+
+par(old_par)
+```
+
+The empirical test-period coverage is **`r sprintf("%.2f%%", 100 * pi95_coverage)`**, with `r pi95_outside_n` observations outside the interval. This is close to the nominal 95% coverage and indicates that the full conditional distribution is reasonably calibrated over the test period. The interval width varies over time because both the Gaussian body and upper-tail parameters respond to the predictor state. Labels A--D identify the same four dates displayed in the conditional-density panels, making it possible to compare each realized loss with the full fitted distribution for that date.
+
+## 8.2 Conditional Value-at-Risk
+
+For a probability level $p>\tau$, the hybrid VaR is the conditional quantile. Conditional EVT methods have a long history in financial risk estimation, including joint modeling of time-varying volatility and extreme-tail risk for VaR and Expected Shortfall (McNeil and Frey, 2000).
+
+
+\[
+\operatorname{VaR}_t(p)
+=
+u_t+
+\frac{\beta_t}{\xi_t}
+\left[
+\left(
+\frac{1-p}{1-\tau}
+\right)^{-\xi_t}
+-1
+\right],
+\]
+
+with the logarithmic exponential-limit expression used when $\xi_t$ is close to zero.
+
+```{r var-plot, fig.height=4.8, fig.cap="Conditional 95% and 99% VaR over the held-out MSFT test period."}
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 10) + 0.1,
+  xpd = NA
+)
+
+plot(
+  test_results$Date,
+  test_results$Loss,
+  type = "l",
+  ylim = range(
+    c(
+      test_results$Loss,
+      test_results$VaR_95,
+      test_results$VaR_99
+    ),
+    finite = TRUE
+  ),
+  xlab = "Date",
+  ylab = "MSFT Loss",
+  main = "MSFT Conditional VaR on Test Set",
+  lwd = 1,
+  col = cb_black
+)
+
+lines(
+  test_results$Date,
+  test_results$VaR_95,
+  lwd = 2,
+  lty = 2,
+  col = cb_blue
+)
+
+lines(
+  test_results$Date,
+  test_results$VaR_99,
+  lwd = 2,
+  lty = 3,
+  col = cb_vermillion
+)
+
+legend(
+  "topright",
+  inset = c(-0.40, 0),
+  legend = c(
+    "Observed Loss",
+    "95% VaR",
+    "99% VaR"
+  ),
+  lty = c(1, 2, 3),
+  lwd = c(1, 2, 2),
+  col = c(cb_black, cb_blue, cb_vermillion),
+  bty = "n",
+  cex = 0.85
+)
+
+par(old_par)
+```
+
+The test-period exceedance rate is **`r sprintf("%.2f%%", 100 * var95_exceed_rate)`** for 95% VaR (`r var95_exceed_n` exceedances) and **`r sprintf("%.2f%%", 100 * var99_exceed_rate)`** for 99% VaR (`r var99_exceed_n` exceedances). The 99% VaR is particularly close to its nominal 1% exceedance probability, while the 95% VaR is somewhat conservative over this test period.
+
+## 8.3 Expected Shortfall
+
+Expected Shortfall measures the expected severity of a loss once the VaR threshold is exceeded. For the fitted GPD tail,
+
+\[
+\operatorname{ES}_t(p)
+=
+u_t+
+\frac{
+\left[
+\operatorname{VaR}_t(p)-u_t
+\right]
++\beta_t
+}{1-\xi_t},
+\]
+
+which is finite for $\xi_t<1$. The fitted model constrains $\xi_t<0.5$, so this condition is satisfied.
+
+```{r es-plot, fig.height=4.8, fig.cap="Conditional 95% and 99% Expected Shortfall over the held-out MSFT test period."}
+old_par <- par(no.readonly = TRUE)
+
+par(
+  mar = c(5, 4, 4, 10) + 0.1,
+  xpd = NA
+)
+
+plot(
+  test_results$Date,
+  test_results$ES_95,
+  type = "l",
+  ylim = range(
+    c(
+      test_results$ES_95,
+      test_results$ES_99
+    ),
+    finite = TRUE
+  ),
+  xlab = "Date",
+  ylab = "Expected Loss",
+  main = "MSFT Conditional Expected Shortfall on Test Set",
+  lwd = 2,
+  col = cb_blue
+)
+
+lines(
+  test_results$Date,
+  test_results$ES_99,
+  lwd = 2,
+  lty = 2,
+  col = cb_vermillion
+)
+
+legend(
+  "topright",
+  inset = c(-0.32, 0),
+  legend = c(
+    "95% ES",
+    "99% ES"
+  ),
+  lty = c(1, 2),
+  lwd = c(2, 2),
+  col = c(cb_blue, cb_vermillion),
+  bty = "n",
+  cex = 0.85
+)
+
+par(old_par)
+```
+
+Expected Shortfall is always above the corresponding VaR and varies substantially over time. Peaks in ES identify periods in which the fitted model predicts not only an elevated extreme-loss threshold but also larger loss severity conditional on entering the tail.
+
+## 8.4 Highest-risk test dates
+
+```{r highest-risk-table, results='asis'}
+highest_risk_display <- highest_risk_dates
+highest_risk_display$Date <- format(
+  highest_risk_display$Date,
+  "%Y-%m-%d"
+)
+
+numeric_cols <- setdiff(
+  names(highest_risk_display),
+  "Date"
+)
+
+highest_risk_display[numeric_cols] <- lapply(
+  highest_risk_display[numeric_cols],
+  function(x) round(x, 4)
+)
+
+knitr::kable(
+  highest_risk_display,
+  caption = "Five test dates with the largest fitted 99% Expected Shortfall.",
+  booktabs = TRUE
+)
+```
+
+These dates summarize the periods that the conditional model identifies as having the largest downside severity. Because ES responds to both the conditional threshold and the fitted GPD parameters, it provides a richer ranking of tail risk than the observed daily loss alone.
+
+# Discussion and limitations
+
+The results support a hybrid approach in which the Gaussian network models the time-varying body of the loss distribution and a separate conditional GPD network models exceedances beyond an observation-specific threshold. The Gaussian standardized residuals are centered close to zero with dispersion close to one, while the remaining tail deviations motivate the EVT component. The GPD diagnostics are broadly consistent with the standard exponential reference over most of the tail, although a single earnings-related MSFT shock remains unusually extreme even after tail standardization.
+
+The full conditional distribution also provides useful out-of-sample risk summaries. The central 95% prediction interval achieves test coverage close to its nominal level, and the 99% VaR exceedance rate is close to 1%. VaR and ES respond dynamically to the predictor state, allowing the model to distinguish periods of relatively low and high conditional tail risk.
+
+Several limitations remain. First, the present splice guarantees continuity of the conditional CDF but does not impose continuity of the density at the 90% threshold. A smoother density-matching construction could be considered in future work. Second, the GPD is estimated from far fewer observations than the Gaussian body, which limits the complexity that can be supported reliably by the tail network. Third, a rolling-origin or expanding-window evaluation would provide a stronger assessment of stability across market regimes.
+
+During model development, the log-volume transformation was introduced after investigating unstable extrapolation associated with unusually large raw-volume predictors. For this reason, the current held-out-period results are best interpreted as evidence from the completed model-development cycle rather than as performance on a completely untouched final holdout. A future rolling or newly held-out evaluation would provide a cleaner assessment of generalization.
+
+# Conclusion
+
+This project demonstrates how neural-network conditional modeling and EVT can be combined to estimate a flexible, time-varying distribution of equity losses. The framework provides a coherent path from conditional mean and volatility estimation to adaptive thresholding, tail modeling, prediction intervals, VaR, and Expected Shortfall. The diagnostic analysis also illustrates an important practical feature of tail-risk modeling: even a well-calibrated EVT model can encounter isolated, event-driven observations that are extreme relative to the fitted tail, and these observations are informative rather than automatically removable.
+
+# References {-}
+
+Ahuja, A., Nallaperuma-Herzberg, S., Rafel, A., Lord, A., and Savory, S. J. (2026). *Modelling Traffic Distributions Using Probabilistic Machine Learning and Extreme Value Theory*. 2026 International Conference on Optical Network Design and Modelling (ONDM), 1--3. <https://doi.org/10.23919/ONDM68511.2026.11618843>.
+
+Carreau, J. and Bengio, Y. (2007). *A Hybrid Pareto Model for Conditional Density Estimation of Asymmetric Fat-Tail Data*. Proceedings of the Eleventh International Conference on Artificial Intelligence and Statistics, PMLR 2:51--58. <https://proceedings.mlr.press/v2/carreau07a.html>.
+
+Carreau, J. and Bengio, Y. (2009). *A Hybrid Pareto Mixture for Conditional Asymmetric Fat-Tailed Distributions*. IEEE Transactions on Neural Networks, 20(7):1087--1101. <https://doi.org/10.1109/TNN.2009.2016339>.
+
+Coles, S. (2001). *An Introduction to Statistical Modeling of Extreme Values*. Springer Series in Statistics. Springer London. <https://doi.org/10.1007/978-1-4471-3675-0>.
+
+McNeil, A. J. and Frey, R. (2000). *Estimation of Tail-Related Risk Measures for Heteroscedastic Financial Time Series: An Extreme Value Approach*. Journal of Empirical Finance, 7(3--4):271--300. <https://doi.org/10.1016/S0927-5398(00)00012-8>.
+
+Richards, J., Huser, R., Bevacqua, E., and Zscheischler, J. (2023). *Insights into the Drivers and Spatiotemporal Trends of Extreme Mediterranean Wildfires with Statistical Deep Learning*. Artificial Intelligence for the Earth Systems, 2(4):e220095. <https://doi.org/10.1175/AIES-D-22-0095.1>.
+
+Wilson, T., Tan, P.-N., and Luo, L. (2022). *DeepGPD: A Deep Learning Approach for Modeling Geospatio-Temporal Extreme Events*. Proceedings of the AAAI Conference on Artificial Intelligence, 36(4):4245--4253. <https://doi.org/10.1609/aaai.v36i4.20344>.
+
+Microsoft Corporation (2015). *Microsoft Cloud and Devices Momentum Highlights Second Quarter Results*. January 26, 2015. Microsoft Investor Relations. <https://www.microsoft.com/en-us/investor/earnings/fy-2015-q2/press-release-webcast>.
+
+Associated Press (2015). *Microsoft shares crash on a disappointing outlook*. January 27, 2015, as published by CBS News. <https://www.cbsnews.com/news/microsoft-shares-crash-on-disappointing-outlook/>.
+
+# Appendix: reproducibility note {-}
+
+The PDF version of this report hides implementation code to emphasize the statistical methodology, diagnostics, and results. The complete R analysis is embedded in this R Markdown source and is available in this repository for reproducibility.
